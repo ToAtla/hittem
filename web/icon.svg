@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff7d5c"/>
+      <stop offset="1" stop-color="#ff5235"/>
+    </linearGradient>
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fefcf8"/>
+      <stop offset="1" stop-color="#f1ebe0"/>
+    </linearGradient>
+    <filter id="sh" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#7a1c0c" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  <rect width="512" height="512" rx="0" fill="url(#bg)"/>
+  <g filter="url(#sh)" transform="rotate(-7 256 256)">
+    <rect x="146" y="120" width="220" height="272" rx="34" fill="url(#paper)"/>
+  </g>
+  <text x="256" y="248" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-size="150" font-weight="700" fill="#ff5235" transform="rotate(-7 256 256)">H</text>
+  <g transform="translate(256 326)">
+    <circle cx="0" cy="0" r="40" fill="#16b866"/>
+    <path d="M-14 -9a36 36 0 0 0 23 23l7-7c1-1 2-1 3-1 4 1 8 2 12 2 2 0 3 1 3 3v11c0 2-1 3-3 3a58 58 0 0 1-58-58c0-2 1-3 3-3h11c2 0 3 1 3 3 0 4 1 8 2 12 0 1 0 2-1 3z" fill="#fff" transform="translate(-3 -3) scale(0.92)"/>
+  </g>
+</svg>
