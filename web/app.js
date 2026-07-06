@@ -13,6 +13,7 @@
   let view = 'loading';
   let pending = null;   // candidate awaiting a call outcome
   let undo = null;      // { id, prevDecision } for one-level undo
+  let bulkTagIds = null; // contact ids of the last import, awaiting an optional bulk tag
 
   const app = document.getElementById('app');
 
@@ -30,8 +31,14 @@
   // ---------- storage ----------
   function load() {
     try { const raw = localStorage.getItem(KEY); if (raw) store = JSON.parse(raw); } catch (e) {}
+    normalize();
+  }
+  function normalize() {
     if (!store.contacts) store.contacts = [];
     if (!store.decisions) store.decisions = {};
+    if (store.filter !== 'local' && store.filter !== 'distant') store.filter = 'all';
+    // tags are an enum; drop anything else (e.g. a hand-edited backup)
+    for (const c of store.contacts) if (c.tag !== 'local' && c.tag !== 'distant') delete c.tag;
   }
   function save() {
     try { localStorage.setItem(KEY, JSON.stringify(store)); } catch (e) { toast('Storage is full'); }
@@ -64,7 +71,7 @@
   function statusLine(d) {
     if (!d || !d.lastActionDate) return 'New to Hittem';
     const o = d.lastOutcome;
-    const tag = o === 'reached' ? 'Reached' : o === 'noAnswer' ? 'No answer' : o === 'skipped' ? 'Skipped' : 'Called';
+    const tag = o === 'reached' ? 'Reached' : o === 'noAnswer' ? 'No answer' : o === 'skipped' ? 'Skipped' : o === 'messaged' ? 'Messaged' : 'Called';
     return tag + ' · ' + rel(d.lastActionDate);
   }
   const byId = (id) => store.contacts.find((c) => c.id === id);
@@ -78,8 +85,9 @@
     if (!db) return 1;
     return da - db;
   }
+  const matchesFilter = (c) => store.filter === 'all' || c.tag === store.filter;
   function buildDeck() {
-    deck = [...store.contacts].sort(rank).map((c) => c.id);
+    deck = store.contacts.filter(matchesFilter).sort(rank).map((c) => c.id);
   }
 
   // ---------- mutations ----------
@@ -94,16 +102,29 @@
     save();
     return prev;
   }
+  function setTag(c, tag) { // tag: 'local' | 'distant' | undefined (clears)
+    if (tag === 'local' || tag === 'distant') c.tag = tag; else delete c.tag;
+    save();
+  }
+  // Merging import: new people are added; people we already have pick up an incoming
+  // tag (so re-importing an exported "local" group tags existing contacts, not dupes).
   function addContacts(list) {
-    let added = 0;
+    let added = 0, tagged = 0;
+    const touched = [];
     for (const c of list) {
       const id = c.id || idFor(c.phone, c.name);
-      if (store.contacts.some((x) => x.id === id)) continue;
-      store.contacts.push({ id, name: c.name || c.phone, phone: c.phone, label: c.label || '' });
+      const existing = store.contacts.find((x) => x.id === id);
+      if (existing) {
+        if ((c.tag === 'local' || c.tag === 'distant') && existing.tag !== c.tag) { existing.tag = c.tag; tagged++; }
+        touched.push(id);
+        continue;
+      }
+      store.contacts.push({ id, name: c.name || c.phone, phone: c.phone, label: c.label || '', tag: c.tag });
       added++;
+      touched.push(id);
     }
     save();
-    return added;
+    return { added, tagged, touched };
   }
 
   // ---------- render ----------
@@ -121,6 +142,12 @@
     </div>`;
   }
 
+  function filterBar() {
+    if (!store.contacts.length) return '';
+    const seg = (v, l) => `<button class="seg ${store.filter === v ? 'on' : ''}" data-act="filter" data-filter="${v}">${l}</button>`;
+    return `<div class="segbar">${seg('all', 'All') + seg('local', 'Local') + seg('distant', 'Distant')}</div>`;
+  }
+
   function renderDeck() {
     const cards = deck.slice(0, STACK).map((id, i) => {
       const c = byId(id), d = store.decisions[id];
@@ -131,10 +158,18 @@
         <h2 class="name">${esc(c.name)}</h2>
         <div class="tel">${c.label ? esc(cap(c.label)) + ' · ' : ''}${esc(c.phone)}</div>
         <div class="meta">${esc(statusLine(d))}</div>
+        <div class="tags">
+          <button class="chip local ${c.tag === 'local' ? 'on' : ''}" data-act="tag" data-id="${id}" data-tag="local">Local</button>
+          <button class="chip distant ${c.tag === 'distant' ? 'on' : ''}" data-act="tag" data-id="${id}" data-tag="distant">Distant</button>
+        </div>
+        <div class="channels">
+          <button class="pill wa" data-act="wa" data-id="${id}">WhatsApp</button>
+          <button class="pill sms" data-act="sms" data-id="${id}">Message</button>
+        </div>
       </article>`;
     }).join('');
 
-    app.innerHTML = topbar() +
+    app.innerHTML = topbar() + filterBar() +
       `<div class="stage" id="stage">${cards}</div>
        <div class="actions">
          <button class="act undo" data-act="undo" aria-label="Undo" ${undo ? '' : 'disabled'}>${I.undo}</button>
@@ -147,11 +182,14 @@
   }
 
   function renderEmpty() {
-    app.innerHTML = topbar() +
+    const filtered = store.filter !== 'all' && store.contacts.length > 0;
+    app.innerHTML = topbar() + filterBar() +
       `<div class="center">
         <div class="mark">✓</div>
-        <h1>All caught up</h1>
-        <p>You've been through everyone for now. Start over to run the deck again.</p>
+        <h1>${filtered ? 'No ' + store.filter + ' contacts left' : 'All caught up'}</h1>
+        <p>${filtered
+          ? "You're through everyone tagged " + store.filter + '. Switch the filter above, or tag more people.'
+          : "You've been through everyone for now. Start over to run the deck again."}</p>
         <div class="stack">
           <button class="btn" data-act="restart">Start over</button>
           <button class="btn ghost" data-act="manage">Manage contacts</button>
@@ -170,7 +208,7 @@
           <button class="btn ghost" data-act="add">Add someone manually</button>
           <button class="btn subtle" data-act="sample">Try it with sample contacts</button>
         </div>
-        <p class="muted">Export your contacts on a Mac: Contacts &rsaquo; Select All &rsaquo; File &rsaquo; Export &rsaquo; Export vCard, then open that file here.</p>
+        <p class="muted">Export your contacts on a Mac: Contacts &rsaquo; Select All &rsaquo; File &rsaquo; Export &rsaquo; Export vCard, then open that file here. Or export one contact group at a time and tag each import in a single tap. Files exported with local/distant groups (e.g. from Google Contacts) tag themselves.</p>
       </div>`;
   }
 
@@ -181,6 +219,7 @@
     const skipStamp = card.querySelector('.stamp.skip');
 
     card.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('button')) return;   // tag chips take the tap, not the drag
       active = true; sx = e.clientX; sy = e.clientY; dx = dy = 0;
       card.style.transition = 'none';
       try { card.setPointerCapture(e.pointerId); } catch (_) {}
@@ -240,6 +279,21 @@
     if (tel) window.location.href = 'tel:' + tel;
   }
 
+  // Open a chat app for the top card; counts as a contact attempt and advances the deck.
+  // No outcome sheet: a sent message is a done action, unlike a call you may not get through on.
+  function messageVia(id, urlFor) {
+    const c = byId(id); if (!c) return;
+    const d = digits(c.phone); if (!d) return;
+    if (deck[0] === id) {
+      undo = { id, prevDecision: record(id, 'messaged') };
+      deck.shift();
+      after();
+    } else {
+      record(id, 'messaged');
+    }
+    window.location.href = urlFor(d);
+  }
+
   // ---------- outcome sheet ----------
   function openOutcome(c) {
     closeOverlay();
@@ -269,6 +323,7 @@
       `<div class="row">
         <div class="dot">${esc(initials(c.name))}</div>
         <div class="nm"><b>${esc(c.name)}</b><small>${esc(c.phone)}</small></div>
+        <button class="chip mini ${c.tag ? c.tag + ' on' : ''}" data-act="cycletag" data-id="${c.id}">${c.tag ? esc(cap(c.tag)) : 'Tag'}</button>
         <button class="del" data-act="del" data-id="${c.id}" aria-label="Delete">${I.trash}</button>
       </div>`).join('') : `<div class="empty-note">No contacts yet.</div>`;
 
@@ -280,6 +335,7 @@
         <button class="btn ghost" data-act="add">Add manually</button>
         <button class="btn ghost" data-act="backup">Export backup</button>
         <button class="btn ghost" data-act="restore">Restore backup</button>
+        <button class="btn ghost" data-act="autotag" style="grid-column:1/-1">Auto-tag local / distant by country code</button>
       </div>
       <div class="list">${rows}</div>
       <button class="btn subtle danger" data-act="clear" style="width:100%">Erase everything</button>
@@ -300,37 +356,81 @@
     setTimeout(() => { const n = document.getElementById('f-name'); if (n) n.focus(); }, 60);
   }
 
+  function openBulkTag(ids) {
+    bulkTagIds = ids;
+    closeOverlay();
+    const scrim = document.createElement('div'); scrim.className = 'scrim'; scrim.dataset.act = 'close';
+    const sheet = document.createElement('div'); sheet.className = 'sheet';
+    sheet.innerHTML = `<div class="grab"></div>
+      <h2>Tag this import?</h2>
+      <p class="who">${ids.length} contact${ids.length > 1 ? 's' : ''} — the file carried no group info</p>
+      <div class="toolrow">
+        <button class="btn" data-act="bulktag" data-tag="local">All local</button>
+        <button class="btn dark" data-act="bulktag" data-tag="distant">All distant</button>
+      </div>
+      <button class="btn subtle" data-act="close" style="width:100%">Leave untagged</button>`;
+    document.body.append(scrim, sheet);
+  }
+
   function closeOverlay() {
     document.querySelectorAll('.scrim, .sheet').forEach((n) => n.remove());
   }
 
   // ---------- vCard ----------
+  // Tags can ride along in two forms, depending on what exported the file:
+  //  - CATEGORIES lines (Google Contacts labels, most CardDAV tools) on the person card
+  //  - group cards (X-ADDRESSBOOKSERVER-KIND / KIND:group) whose MEMBER urns reference
+  //    person UIDs (CardDAV dumps). Apple's own UI export carries neither.
+  // A group/category named exactly "local" or "distant" (any case) sets the tag.
   function parseVCards(text) {
     const unfolded = text.replace(/\r\n[ \t]/g, '').replace(/\n[ \t]/g, '');
     const blocks = unfolded.split(/BEGIN:VCARD/i).slice(1);
-    const out = [];
+    const people = [], groups = [];
+    let hadTags = false;
     for (const b of blocks) {
       const lines = b.split(/\r\n|\n|\r/);
-      let fn = '', n = '', tels = [];
+      let fn = '', n = '', uid = '', isGroup = false;
+      const tels = [], cats = [], members = [];
       for (const line of lines) {
         if (/^FN[:;]/i.test(line)) fn = afterColon(line);
         else if (/^N[:;]/i.test(line)) n = afterColon(line);
+        else if (/^UID[:;]/i.test(line)) uid = afterColon(line).trim().toLowerCase();
         else if (/^(?:item\d+\.)?TEL/i.test(line)) {
           const val = afterColon(line);
           const head = line.split(':')[0];
           const m = head.match(/TYPE=([^;:]+)/i);
           if (val.trim()) tels.push({ number: val.trim(), label: m ? m[1].toLowerCase() : 'phone' });
+        } else if (/^(?:item\d+\.)?CATEGORIES[:;]/i.test(line)) {
+          for (const cat of afterColon(line).split(/(?<!\\),/)) cats.push(deescape(cat).trim().toLowerCase());
+        } else if (/^(?:X-ADDRESSBOOKSERVER-KIND|KIND)[:;]/i.test(line) && /group/i.test(afterColon(line))) {
+          isGroup = true;
+        } else if (/^(?:item\d+\.)?(?:X-ADDRESSBOOKSERVER-MEMBER|MEMBER)[:;]/i.test(line)) {
+          members.push(afterColon(line).trim().replace(/^urn:uuid:/i, '').toLowerCase());
         }
       }
+      if (isGroup) { groups.push({ name: deescape(fn).trim().toLowerCase(), members }); continue; }
       let name = deescape(fn).trim();
       if (!name && n) name = deescape(n).split(';').filter(Boolean).reverse().join(' ').trim();
       if (tels.length) {
         tels.sort((a, b) => score(b.label) - score(a.label));
         const t = tels[0];
-        out.push({ name: name || t.number, phone: t.number, label: cleanLabel(t.label) });
+        const isL = cats.includes('local'), isD = cats.includes('distant');
+        if (isL || isD) hadTags = true;
+        people.push({
+          name: name || t.number, phone: t.number, label: cleanLabel(t.label),
+          tag: isL !== isD ? (isL ? 'local' : 'distant') : undefined, // both = ambiguous, leave blank
+          uid
+        });
       }
     }
-    return out;
+    for (const g of groups) {
+      if (g.name !== 'local' && g.name !== 'distant') continue;
+      for (const m of g.members) {
+        const p = people.find((x) => x.uid && x.uid === m);
+        if (p) { p.tag = g.name; hadTags = true; }
+      }
+    }
+    return { contacts: people, hadTags };
   }
   const afterColon = (l) => { const i = l.indexOf(':'); return i < 0 ? '' : l.slice(i + 1); };
   const deescape = (s) => (s || '').replace(/\\n/gi, ' ').replace(/\\,/g, ',').replace(/\\;/g, ';').replace(/\\\\/g, '\\');
@@ -342,6 +442,32 @@
     inp.type = 'file'; inp.accept = accept;
     inp.addEventListener('change', () => { const f = inp.files[0]; if (f) { const r = new FileReader(); r.onload = () => handler(String(r.result)); r.readAsText(f); } });
     inp.click();
+  }
+
+  // ---------- auto-tag ----------
+  function autoTag() {
+    // Guess local: numbers with no country prefix, plus the most common prefix in the list.
+    const plus = store.contacts.map((c) => digits(c.phone)).filter((d) => d.startsWith('+')).map((d) => d.slice(1));
+    let code = null;
+    if (plus.length) {
+      if (plus.filter((d) => d.startsWith('1')).length >= plus.length / 2) code = '1'; // NANP dominates
+      else {
+        const freq = {};
+        for (const d of plus) { const k = d.slice(0, 3); freq[k] = (freq[k] || 0) + 1; }
+        code = Object.keys(freq).sort((a, b) => freq[b] - freq[a])[0];
+      }
+    }
+    let n = 0;
+    for (const c of store.contacts) {
+      if (c.tag) continue; // only fills blanks; manual tags win
+      const d = digits(c.phone);
+      c.tag = !d.startsWith('+') || (code && d.slice(1).startsWith(code)) ? 'local' : 'distant';
+      n++;
+    }
+    save(); buildDeck();
+    view = deck.length ? 'deck' : (store.contacts.length ? 'empty' : 'onboarding');
+    render(); openManage();
+    toast(n ? 'Tagged ' + n + ' contact' + (n > 1 ? 's' : '') : 'Everyone already tagged');
   }
 
   // ---------- backup ----------
@@ -357,12 +483,12 @@
 
   // ---------- samples ----------
   const SAMPLES = [
-    { name: 'Anna Haro', phone: '+354 555 0142', label: 'mobile' },
-    { name: 'Gunnar Pétursson', phone: '+354 555 0188', label: 'mobile' },
-    { name: 'Maria Olsen', phone: '+47 555 0119', label: 'home' },
-    { name: 'David Chen', phone: '+1 415 555 0177', label: 'mobile' },
-    { name: 'Sara Lind', phone: '+354 555 0163', label: 'work' },
-    { name: 'Tomás Reyes', phone: '+34 555 0150', label: 'mobile' }
+    { name: 'Anna Haro', phone: '+354 555 0142', label: 'mobile', tag: 'local' },
+    { name: 'Gunnar Pétursson', phone: '+354 555 0188', label: 'mobile', tag: 'local' },
+    { name: 'Maria Olsen', phone: '+47 555 0119', label: 'home', tag: 'distant' },
+    { name: 'David Chen', phone: '+1 415 555 0177', label: 'mobile', tag: 'distant' },
+    { name: 'Sara Lind', phone: '+354 555 0163', label: 'work', tag: 'local' },
+    { name: 'Tomás Reyes', phone: '+34 555 0150', label: 'mobile', tag: 'distant' }
   ];
 
   // ---------- events ----------
@@ -393,15 +519,29 @@
         break;
       }
       case 'import': importFile('.vcf,text/vcard,text/x-vcard', (txt) => {
-        const found = parseVCards(txt);
-        if (!found.length) { toast('No contacts found in that file'); return; }
-        const n = addContacts(found); buildDeck(); view = deck.length ? 'deck' : 'empty'; closeOverlay(); render();
-        toast(n ? `Imported ${n} contact${n > 1 ? 's' : ''}` : 'Already imported');
+        const parsed = parseVCards(txt);
+        if (!parsed.contacts.length) { toast('No contacts found in that file'); return; }
+        const res = addContacts(parsed.contacts);
+        buildDeck(); view = deck.length ? 'deck' : 'empty'; closeOverlay(); render();
+        const bits = [];
+        if (res.added) bits.push(res.added + ' added');
+        if (res.tagged) bits.push(res.tagged + ' tagged from groups');
+        toast(bits.length ? 'Import: ' + bits.join(', ') : 'Already imported');
+        // file carried no usable group info -> offer to tag the whole batch in one tap
+        if (!parsed.hadTags && res.touched.length) openBulkTag(res.touched);
       }); break;
+      case 'bulktag': {
+        const t = el.dataset.tag; let n = 0;
+        for (const id of bulkTagIds || []) { const c = byId(id); if (c && c.tag !== t) { c.tag = t; n++; } }
+        bulkTagIds = null; save(); buildDeck(); view = deck.length ? 'deck' : 'empty';
+        closeOverlay(); render();
+        toast('Tagged ' + n + ' ' + t);
+        break;
+      }
       case 'sample': start(SAMPLES); break;
       case 'backup': exportBackup(); break;
       case 'restore': importFile('.json,application/json', (txt) => {
-        try { const data = JSON.parse(txt); store.contacts = data.contacts || []; store.decisions = data.decisions || {}; save(); buildDeck(); view = deck.length ? 'deck' : 'empty'; closeOverlay(); render(); toast('Backup restored'); }
+        try { const data = JSON.parse(txt); store.contacts = data.contacts || []; store.decisions = data.decisions || {}; store.filter = data.filter; normalize(); save(); buildDeck(); view = deck.length ? 'deck' : 'empty'; closeOverlay(); render(); toast('Backup restored'); }
         catch (_) { toast('That file is not a Hittem backup'); }
       }); break;
       case 'del': {
@@ -418,6 +558,36 @@
           store = { contacts: [], decisions: {} }; save(); deck = []; undo = null; view = 'onboarding'; closeOverlay(); render();
         }
         break;
+      case 'filter': {
+        store.filter = el.dataset.filter; save();
+        buildDeck(); view = deck.length ? 'deck' : 'empty'; render();
+        break;
+      }
+      case 'tag': {
+        const c = byId(el.dataset.id); if (!c) break;
+        // Card chips toggle one value directly; manage's cycletag walks all three states.
+        setTag(c, c.tag === el.dataset.tag ? undefined : el.dataset.tag);
+        // Deliberately not buildDeck(): rebuilding would resurrect cards already swiped
+        // this session. Only this card's deck membership can change here, and only in the
+        // shrink direction (chips exist solely on cards already dealt into the deck).
+        // Leaving the filter is not a skip; nothing is recorded.
+        if (!matchesFilter(c)) { deck = deck.filter((x) => x !== c.id); if (!deck.length) view = 'empty'; }
+        render();
+        break;
+      }
+      case 'cycletag': {
+        const c = byId(el.dataset.id); if (!c) break;
+        setTag(c, c.tag === 'local' ? 'distant' : c.tag === 'distant' ? undefined : 'local');
+        el.className = 'chip mini' + (c.tag ? ' ' + c.tag + ' on' : '');
+        el.textContent = c.tag ? cap(c.tag) : 'Tag';
+        buildDeck(); view = deck.length ? 'deck' : (store.contacts.length ? 'empty' : 'onboarding'); render();
+        break;
+      }
+      case 'autotag': autoTag(); break;
+      // WhatsApp resolves international-format numbers (country code, no +). We pass the
+      // number as saved and never guess a country prefix: a wrong guess messages a stranger.
+      case 'wa': messageVia(el.dataset.id, (d) => 'whatsapp://send?phone=' + d.replace(/\D/g, '')); break;
+      case 'sms': messageVia(el.dataset.id, (d) => 'sms:' + d); break;
       case 'reached': resolveOutcome('reached'); break;
       case 'noanswer': resolveOutcome('noAnswer'); break;
       case 'dismiss-outcome': resolveOutcome(null); break;
@@ -430,9 +600,17 @@
     const { id, prevDecision } = undo;
     if (prevDecision) store.decisions[id] = prevDecision; else delete store.decisions[id];
     save();
-    deck.unshift(id);
     undo = null;
-    if (view !== 'deck') view = 'deck';
+    // The decision is reverted either way, but the card only re-enters the deck if it
+    // belongs under the active filter (it may have been swiped under a different one).
+    const c = byId(id);
+    if (c && matchesFilter(c)) {
+      deck.unshift(id);
+      view = 'deck';
+    } else {
+      toast('Undone — hidden by the current filter');
+      if (!deck.length) view = store.contacts.length ? 'empty' : 'onboarding';
+    }
     render();
   }
 
@@ -448,6 +626,7 @@
   }
 
   // ---------- boot ----------
+  window.__hittem = { parseVCards, openBulkTag }; // console/testing hook; the app itself never uses it
   load();
   if (navigator.storage && navigator.storage.persist) { navigator.storage.persist().catch(() => {}); }
   if (store.contacts.length) { buildDeck(); view = deck.length ? 'deck' : 'empty'; }

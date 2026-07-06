@@ -1,8 +1,13 @@
-# HITTEM
+# Hittem
 
 A swipe-to-decide contact app. Open it, get one person at a time, swipe right to call them now or left to skip. It records what you do so the people you have gone longest without calling float to the top next time.
 
-## Phase 1 scope
+Two implementations live here:
+
+- `web/` — the shipped app: a fully client-side PWA (add to home screen via Safari), deployed to GitHub Pages at https://toatla.github.io/hittem/ by `.github/workflows/pages.yml`. Contacts come from a vCard import or manual entry, everything stays in browser storage, zero network calls after load. Contacts can be tagged local/distant and the deck filtered to either or both.
+- `HITTEM/` — the native SwiftUI app (parked; requires Developer Mode on the phone, which managed Screen Time restrictions block).
+
+## Native app scope
 
 - Reads your Contacts (anyone with a phone number).
 - Card deck, swipe right = call (`tel:`), swipe left = skip.
