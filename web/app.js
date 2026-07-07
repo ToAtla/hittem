@@ -37,8 +37,14 @@
     if (!store.contacts) store.contacts = [];
     if (!store.decisions) store.decisions = {};
     if (store.filter !== 'local' && store.filter !== 'distant') store.filter = 'all';
-    // tags are an enum; drop anything else (e.g. a hand-edited backup)
-    for (const c of store.contacts) if (c.tag !== 'local' && c.tag !== 'distant') delete c.tag;
+    // Field hygiene, mirrored at the addContacts() write site: tags are an enum (drop
+    // anything else, e.g. a hand-edited backup); messenger is an opaque token, so require
+    // a string, trim it, and cap its length rather than trusting imported data.
+    for (const c of store.contacts) {
+      if (c.tag !== 'local' && c.tag !== 'distant') delete c.tag;
+      if (typeof c.messenger !== 'string' || !c.messenger.trim()) delete c.messenger;
+      else c.messenger = c.messenger.trim().slice(0, 200);
+    }
   }
   function save() {
     try { localStorage.setItem(KEY, JSON.stringify(store)); } catch (e) { toast('Storage is full'); }
@@ -109,22 +115,25 @@
   // Merging import: new people are added; people we already have pick up an incoming
   // tag (so re-importing an exported "local" group tags existing contacts, not dupes).
   function addContacts(list) {
-    let added = 0, tagged = 0;
+    let added = 0, tagged = 0, enriched = 0;
     const touched = [];
     for (const c of list) {
       const id = c.id || idFor(c.phone, c.name);
+      // same invariant normalize() enforces at load/restore, applied at this write site too
+      const msgr = typeof c.messenger === 'string' && c.messenger.trim() ? c.messenger.trim().slice(0, 200) : undefined;
       const existing = store.contacts.find((x) => x.id === id);
       if (existing) {
         if ((c.tag === 'local' || c.tag === 'distant') && existing.tag !== c.tag) { existing.tag = c.tag; tagged++; }
+        if (msgr && existing.messenger !== msgr) { existing.messenger = msgr; enriched++; }
         touched.push(id);
         continue;
       }
-      store.contacts.push({ id, name: c.name || c.phone, phone: c.phone, label: c.label || '', tag: c.tag });
+      store.contacts.push({ id, name: c.name || c.phone, phone: c.phone, label: c.label || '', tag: c.tag, messenger: msgr });
       added++;
       touched.push(id);
     }
     save();
-    return { added, tagged, touched };
+    return { added, tagged, enriched, touched };
   }
 
   // ---------- render ----------
@@ -165,6 +174,7 @@
         <div class="channels">
           <button class="pill wa" data-act="wa" data-id="${id}">WhatsApp</button>
           <button class="pill sms" data-act="sms" data-id="${id}">Message</button>
+          ${c.messenger ? `<button class="pill msgr" data-act="msgr" data-id="${id}">Messenger</button>` : ''}
         </div>
       </article>`;
     }).join('');
@@ -281,9 +291,8 @@
 
   // Open a chat app for the top card; counts as a contact attempt and advances the deck.
   // No outcome sheet: a sent message is a done action, unlike a call you may not get through on.
-  function messageVia(id, urlFor) {
-    const c = byId(id); if (!c) return;
-    const d = digits(c.phone); if (!d) return;
+  function messageVia(id, url) {
+    if (!url) return;
     if (deck[0] === id) {
       undo = { id, prevDecision: record(id, 'messaged') };
       deck.shift();
@@ -291,7 +300,7 @@
     } else {
       record(id, 'messaged');
     }
-    window.location.href = urlFor(d);
+    window.location.href = url;
   }
 
   // ---------- outcome sheet ----------
@@ -389,8 +398,8 @@
     let hadTags = false;
     for (const b of blocks) {
       const lines = b.split(/\r\n|\n|\r/);
-      let fn = '', n = '', uid = '', isGroup = false;
-      const tels = [], cats = [], members = [];
+      let fn = '', n = '', uid = '', msgr = '', isGroup = false;
+      const tels = [], cats = [], members = [], impps = {}, imLabels = {};
       for (const line of lines) {
         if (/^FN[:;]/i.test(line)) fn = afterColon(line);
         else if (/^N[:;]/i.test(line)) n = afterColon(line);
@@ -400,6 +409,18 @@
           const head = line.split(':')[0];
           const m = head.match(/TYPE=([^;:]+)/i);
           if (val.trim()) tels.push({ number: val.trim(), label: m ? m[1].toLowerCase() : 'phone' });
+        } else if (/^(?:item\d+\.)?IMPP/i.test(line)) {
+          // Messenger writes itself into synced contacts as an IM profile whose value is an
+          // opaque PR:<token> profile reference (sometimes wrapped as xmpp:PR:<token>). The
+          // service can be named on the line itself (X-SERVICE-TYPE=Messenger) or by a
+          // companion label sharing the item group: item1.IMPP:... + item1.X-ABLabel:Messenger.
+          const head = line.split(':')[0];
+          const g = (head.match(/^(item\d+)\./i) || [, ''])[1].toLowerCase();
+          const v = afterColon(line).trim().replace(/^xmpp:/i, '');
+          if (v && /messenger/i.test(head)) msgr = v;
+          else if (v && g && !(g in impps)) impps[g] = v;
+        } else if (/^(item\d+)\.X-ABLabel[:;]/i.test(line)) {
+          imLabels[line.match(/^(item\d+)\./i)[1].toLowerCase()] = afterColon(line);
         } else if (/^(?:item\d+\.)?CATEGORIES[:;]/i.test(line)) {
           for (const cat of afterColon(line).split(/(?<!\\),/)) cats.push(deescape(cat).trim().toLowerCase());
         } else if (/^(?:X-ADDRESSBOOKSERVER-KIND|KIND)[:;]/i.test(line) && /group/i.test(afterColon(line))) {
@@ -409,6 +430,9 @@
         }
       }
       if (isGroup) { groups.push({ name: deescape(fn).trim().toLowerCase(), members }); continue; }
+      if (!msgr) {
+        for (const g in impps) if (/messenger/i.test(imLabels[g] || '')) { msgr = impps[g]; break; }
+      }
       let name = deescape(fn).trim();
       if (!name && n) name = deescape(n).split(';').filter(Boolean).reverse().join(' ').trim();
       if (tels.length) {
@@ -419,6 +443,7 @@
         people.push({
           name: name || t.number, phone: t.number, label: cleanLabel(t.label),
           tag: isL !== isD ? (isL ? 'local' : 'distant') : undefined, // both = ambiguous, leave blank
+          messenger: msgr || undefined,
           uid
         });
       }
@@ -526,6 +551,7 @@
         const bits = [];
         if (res.added) bits.push(res.added + ' added');
         if (res.tagged) bits.push(res.tagged + ' tagged from groups');
+        if (res.enriched) bits.push(res.enriched + ' got Messenger');
         toast(bits.length ? 'Import: ' + bits.join(', ') : 'Already imported');
         // file carried no usable group info -> offer to tag the whole batch in one tap
         if (!parsed.hadTags && res.touched.length) openBulkTag(res.touched);
@@ -586,8 +612,17 @@
       case 'autotag': autoTag(); break;
       // WhatsApp resolves international-format numbers (country code, no +). We pass the
       // number as saved and never guess a country prefix: a wrong guess messages a stranger.
-      case 'wa': messageVia(el.dataset.id, (d) => 'whatsapp://send?phone=' + d.replace(/\D/g, '')); break;
-      case 'sms': messageVia(el.dataset.id, (d) => 'sms:' + d); break;
+      // Messenger uses the PR:<token> profile reference synced into Contacts by the app;
+      // colons are legal in a URL path segment, so only the rest gets percent-encoded.
+      case 'wa': case 'sms': case 'msgr': {
+        const c = byId(el.dataset.id); if (!c) break;
+        const d = digits(c.phone);
+        const url = act === 'wa' ? (d && 'whatsapp://send?phone=' + d.replace(/\D/g, ''))
+          : act === 'sms' ? (d && 'sms:' + d)
+          : (c.messenger && 'fb-messenger://user-thread/' + encodeURIComponent(c.messenger).replace(/%3A/gi, ':'));
+        messageVia(c.id, url);
+        break;
+      }
       case 'reached': resolveOutcome('reached'); break;
       case 'noanswer': resolveOutcome('noAnswer'); break;
       case 'dismiss-outcome': resolveOutcome(null); break;
@@ -626,7 +661,7 @@
   }
 
   // ---------- boot ----------
-  window.__hittem = { parseVCards, openBulkTag }; // console/testing hook; the app itself never uses it
+  window.__hittem = { parseVCards, openBulkTag, addContacts }; // console/testing hook; the app itself never uses it
   load();
   if (navigator.storage && navigator.storage.persist) { navigator.storage.persist().catch(() => {}); }
   if (store.contacts.length) { buildDeck(); view = deck.length ? 'deck' : 'empty'; }

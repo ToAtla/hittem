@@ -1,5 +1,5 @@
 /* Offline app shell. Cache-first so Hittem launches with no network. */
-const CACHE = 'hittem-v2';
+const CACHE = 'hittem-v3';
 const ASSETS = [
   '.', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest',
   'icon.svg', 'icon-180.png', 'icon-192.png', 'icon-512.png', 'icon-512-maskable.png'
