@@ -9,3 +9,4 @@ xcuserdata/
 .cache/
 tmp/
 .claude/
+.vercel
