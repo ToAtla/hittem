@@ -2,7 +2,9 @@
 
 A swipe-to-decide contact app. Open it, get one person at a time, swipe right to call them now or left to skip. It records what you do so the people you have gone longest without calling float to the top next time.
 
-`web/` holds the app: a client-side PWA (add to home screen via Safari), deployed to https://hittem.site on every push to `main`. Vercel builds from the repo root and serves `web/` as the output directory, per `vercel.json`. Contacts come from a vCard import, Google Contacts, or manual entry; decisions live in browser storage. Contacts can be tagged local/distant and the deck filtered to either or both.
+`web/` holds the app: a client-side PWA (add to home screen via Safari), deployed to https://hittem.site on every push to `main`. Contacts come from a vCard import, Google Contacts, or manual entry; decisions live in browser storage. Contacts can be tagged local/distant and the deck filtered to either or both.
+
+Hosting is a VM running Caddy, with `.github/workflows/deploy.yml` rsyncing `web/` to it on push. See [deploy/README.md](deploy/README.md) for provisioning, DNS and the deploy key.
 
 Storage is per-origin, so history does not follow you between domains. Moving devices or domains means **Export backup** on the old one and **Restore backup** on the new.
 

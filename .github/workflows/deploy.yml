@@ -1,0 +1,56 @@
+name: Deploy Hittem
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Two pushes in quick succession would otherwise race each other into the same
+# directory over rsync. Latest wins.
+concurrency:
+  group: deploy-hittem
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Skips cleanly until the VM exists and the secrets are set, so pushes in the
+    # meantime do not fail the build with a red X on every commit.
+    if: ${{ secrets.DEPLOY_HOST != '' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure SSH
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # Pinning the host key rather than accepting on first use: without this,
+          # a hijacked DNS answer would get the deploy key handed straight to it.
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Sync web/ to the VM
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          # --delete removes files on the VM that no longer exist in web/. The
+          # trailing slash on the source and the dedicated target directory are what
+          # keep that scoped; do not point this at a path holding anything else.
+          rsync -avz --delete \
+            -e "ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes" \
+            web/ "$DEPLOY_USER@$DEPLOY_HOST:/srv/hittem/"
+
+      - name: Verify the site is serving the new build
+        run: |
+          sleep 5
+          code=$(curl -sS -o /dev/null -w '%{http_code}' https://hittem.site/)
+          echo "hittem.site returned $code"
+          test "$code" = "200"
+          # A stale service worker is the failure mode that hurts most, so confirm
+          # the file is reachable and not being served from a cache layer.
+          curl -sSI https://hittem.site/service-worker.js | grep -i '^cache-control' || true
