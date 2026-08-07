@@ -2,10 +2,7 @@
 
 A swipe-to-decide contact app. Open it, get one person at a time, swipe right to call them now or left to skip. It records what you do so the people you have gone longest without calling float to the top next time.
 
-Two implementations live here:
-
-- `web/` — the shipped app: a client-side PWA (add to home screen via Safari), deployed to https://hittem.site via Vercel and to https://toatla.github.io/hittem/ by `.github/workflows/pages.yml`. Contacts come from a vCard import, Google Contacts, or manual entry; decisions live in browser storage. Contacts can be tagged local/distant and the deck filtered to either or both.
-- `HITTEM/` — the native SwiftUI app (parked; requires Developer Mode on the phone, which managed Screen Time restrictions block).
+`web/` holds the app: a client-side PWA (add to home screen via Safari), deployed to https://hittem.site via Vercel and to https://toatla.github.io/hittem/ by `.github/workflows/pages.yml`. Contacts come from a vCard import, Google Contacts, or manual entry; decisions live in browser storage. Contacts can be tagged local/distant and the deck filtered to either or both.
 
 ## Google sign-in and Contacts
 
@@ -33,26 +30,6 @@ What it does and does not do:
 
 The gate is an access gate, not a confidentiality boundary. Contacts and history still sit unencrypted in `localStorage`, readable by anyone with the unlocked device or a devtools window. It keeps the deck out of casual view; it is not protection against someone holding the phone. Real confidentiality requires a backend holding the data, which is not built.
 
-## Native app scope
-
-- Reads your Contacts (anyone with a phone number).
-- Card deck, swipe right = call (`tel:`), swipe left = skip.
-- After a call it asks one tap: Reached / No answer.
-- Ranks people you have never actioned first, then by who you have gone longest without calling.
-- Stores all decisions locally with SwiftData. Nothing leaves the phone.
-
 ## Why it builds history going forward, not backward
 
-iOS does not let a third-party app read your call log, SMS/iMessage, or WhatsApp/Telegram/Signal/Messenger history. There is no public API for any of it. So HITTEM records your contact attempts from first launch instead of importing the past. Pulling real history would require a separate macOS companion app reading local databases with Full Disk Access (a possible later phase).
-
-## Build and run
-
-The Xcode project is generated from `project.yml` with [XcodeGen](https://github.com/yonaskolb/XcodeGen):
-
-```sh
-brew install xcodegen   # one time
-xcodegen generate       # creates HITTEM.xcodeproj
-open HITTEM.xcodeproj
-```
-
-In Xcode: select the HITTEM target, Signing & Capabilities, pick your personal team (free Apple ID). Plug in your iPhone, choose it as the run destination, and press Run. With a free Apple ID the install lasts 7 days before it needs re-running from Xcode.
+Neither a browser nor a third-party iOS app can read your call log, SMS/iMessage, or WhatsApp/Telegram/Signal/Messenger history. There is no public API for any of it. So Hittem records your contact attempts from first use instead of importing the past.

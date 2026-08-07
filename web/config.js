@@ -8,5 +8,5 @@
  * sign-in gate. See README for how to mint the ID.
  */
 window.HITTEM_CONFIG = {
-  googleClientId: ''
+  googleClientId: '594943275713-cp0immffsodofcefi4dk4vlrjuve2188.apps.googleusercontent.com'
 };
