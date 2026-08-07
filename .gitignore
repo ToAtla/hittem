@@ -2,3 +2,10 @@
 .cache/
 tmp/
 .claude/
+
+# Terraform state can carry resource detail and must not be committed
+.terraform/
+*.tfstate
+*.tfstate.*
+tfplan
+crash.log
