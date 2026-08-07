@@ -14,13 +14,27 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    # Skips cleanly until the VM exists and the secrets are set, so pushes in the
-    # meantime do not fail the build with a red X on every commit.
-    if: ${{ secrets.DEPLOY_HOST != '' }}
     steps:
+      # The secrets context is not available in a job-level `if`, so the guard has
+      # to be a step. This keeps pushes green until the VM exists and the secrets
+      # are set, instead of failing every commit in the meantime.
+      - name: Check deploy configuration
+        id: cfg
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          if [ -z "$DEPLOY_HOST" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::DEPLOY_HOST is not set, skipping deploy. See deploy/README.md."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v5
+        if: steps.cfg.outputs.configured == 'true'
 
       - name: Configure SSH
+        if: steps.cfg.outputs.configured == 'true'
         env:
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
@@ -34,6 +48,7 @@ jobs:
           chmod 600 ~/.ssh/known_hosts
 
       - name: Sync web/ to the VM
+        if: steps.cfg.outputs.configured == 'true'
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
@@ -45,12 +60,12 @@ jobs:
             -e "ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes" \
             web/ "$DEPLOY_USER@$DEPLOY_HOST:/srv/hittem/"
 
-      - name: Verify the site is serving the new build
+      - name: Verify the site is serving
+        if: steps.cfg.outputs.configured == 'true'
         run: |
-          sleep 5
           code=$(curl -sS -o /dev/null -w '%{http_code}' https://hittem.site/)
           echo "hittem.site returned $code"
           test "$code" = "200"
-          # A stale service worker is the failure mode that hurts most, so confirm
-          # the file is reachable and not being served from a cache layer.
+          # A pinned service worker is the failure mode that hurts most, so show what
+          # cache policy it is actually being served with.
           curl -sSI https://hittem.site/service-worker.js | grep -i '^cache-control' || true
