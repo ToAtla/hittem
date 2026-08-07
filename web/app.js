@@ -1,7 +1,17 @@
 'use strict';
 /*
- * Hittem - fully client-side. Contacts and decisions live only in this browser
- * (localStorage). There are no network calls and no analytics. Nothing leaves the device.
+ * Hittem - client-side. Contacts and decisions live only in this browser (localStorage).
+ * There is no analytics and no backend.
+ *
+ * Network calls are limited to Google sign-in and a read of Google Contacts, and only
+ * when a client ID is configured and the user asks for it. With config.js left empty the
+ * app runs exactly as it always did: no gate, no requests, nothing leaves the device.
+ *
+ * The sign-in gate is an access gate, not a confidentiality boundary. Everything still
+ * sits unencrypted in localStorage, readable by anyone holding an unlocked device or a
+ * devtools window. It keeps a casual passer-by out of the deck; it is not protection
+ * against someone with the device in hand. Real confidentiality needs a backend holding
+ * the data, which is a later step.
  */
 (function () {
   const KEY = 'hittem:data:v1';
@@ -44,6 +54,12 @@
       if (c.tag !== 'local' && c.tag !== 'distant') delete c.tag;
       if (typeof c.messenger !== 'string' || !c.messenger.trim()) delete c.messenger;
       else c.messenger = c.messenger.trim().slice(0, 200);
+      // note is free text from a contact's Notes field and gid is a Google resource name;
+      // both arrive from outside, so both get the same treatment as messenger above.
+      if (typeof c.note !== 'string' || !c.note.trim()) delete c.note;
+      else c.note = c.note.trim().slice(0, 2000);
+      if (typeof c.gid !== 'string' || !c.gid.trim()) delete c.gid;
+      else c.gid = c.gid.trim().slice(0, 200);
     }
   }
   function save() {
@@ -82,6 +98,14 @@
   }
   const byId = (id) => store.contacts.find((c) => c.id === id);
 
+  // ---------- auth ----------
+  // Every one of these is false/null when config.js carries no client ID, which is what
+  // keeps the unconfigured build identical to the original local-only app.
+  const G = () => window.HittemGoogle;
+  const gateEnabled = () => !!(G() && G().configured());
+  const gsession = () => (gateEnabled() && G().session()) || null;
+  const signedIn = () => !!gsession();
+
   // ---------- ranking ----------
   function rank(a, b) {
     const da = store.decisions[a.id] && store.decisions[a.id].lastActionDate;
@@ -115,32 +139,54 @@
   // Merging import: new people are added; people we already have pick up an incoming
   // tag (so re-importing an exported "local" group tags existing contacts, not dupes).
   function addContacts(list) {
-    let added = 0, tagged = 0, enriched = 0;
+    let added = 0, tagged = 0, enriched = 0, noted = 0;
     const touched = [];
     for (const c of list) {
       const id = c.id || idFor(c.phone, c.name);
       // same invariant normalize() enforces at load/restore, applied at this write site too
       const msgr = typeof c.messenger === 'string' && c.messenger.trim() ? c.messenger.trim().slice(0, 200) : undefined;
+      const note = typeof c.note === 'string' && c.note.trim() ? c.note.trim().slice(0, 2000) : undefined;
+      const gid = typeof c.gid === 'string' && c.gid.trim() ? c.gid.trim().slice(0, 200) : undefined;
       const existing = store.contacts.find((x) => x.id === id);
       if (existing) {
         if ((c.tag === 'local' || c.tag === 'distant') && existing.tag !== c.tag) { existing.tag = c.tag; tagged++; }
         if (msgr && existing.messenger !== msgr) { existing.messenger = msgr; enriched++; }
+        if (note && existing.note !== note) { existing.note = note; noted++; }
+        // Remembering the Google resource name is what will let a later sync write back to
+        // the right card without re-matching on phone number.
+        if (gid && existing.gid !== gid) existing.gid = gid;
         touched.push(id);
         continue;
       }
-      store.contacts.push({ id, name: c.name || c.phone, phone: c.phone, label: c.label || '', tag: c.tag, messenger: msgr });
+      store.contacts.push({ id, name: c.name || c.phone, phone: c.phone, label: c.label || '', tag: c.tag, messenger: msgr, note, gid });
       added++;
       touched.push(id);
     }
     save();
-    return { added, tagged, enriched, touched };
+    return { added, tagged, enriched, noted, touched };
   }
 
   // ---------- render ----------
   function render() {
+    if (view === 'signin') return renderSignIn();
     if (view === 'deck') return renderDeck();
     if (view === 'empty') return renderEmpty();
     return renderOnboarding();
+  }
+
+  // Shown only when a client ID is configured and no session is stored. Everything the
+  // app knows is already on this device, so this gate is about keeping the deck out of
+  // casual view, not about protecting the data at rest. See the file header.
+  function renderSignIn() {
+    app.innerHTML = `<div class="center">
+        <div class="mark">Hittem<span style="color:var(--brand)">.</span></div>
+        <h1>Sign in to continue</h1>
+        <p>Hittem uses your Google account to unlock the deck and to read your contacts. Your call history stays on this device.</p>
+        <div class="stack">
+          <button class="btn" data-act="signin">Continue with Google</button>
+        </div>
+        <p class="muted" id="signin-note">You will be asked for read-only access to Google Contacts. Hittem never writes to them.</p>
+      </div>`;
   }
 
   function topbar() {
@@ -167,6 +213,7 @@
         <h2 class="name">${esc(c.name)}</h2>
         <div class="tel">${c.label ? esc(cap(c.label)) + ' · ' : ''}${esc(c.phone)}</div>
         <div class="meta">${esc(statusLine(d))}</div>
+        ${c.note ? `<div class="note"><span>${esc(c.note)}</span></div>` : ''}
         <div class="tags">
           <button class="chip local ${c.tag === 'local' ? 'on' : ''}" data-act="tag" data-id="${id}" data-tag="local">Local</button>
           <button class="chip distant ${c.tag === 'distant' ? 'on' : ''}" data-act="tag" data-id="${id}" data-tag="distant">Distant</button>
@@ -214,7 +261,8 @@
         <h1>Who are you calling?</h1>
         <p>Bring in your contacts and Hittem deals them out one at a time. Swipe right to call, left to skip. Everything stays on this device.</p>
         <div class="stack">
-          <button class="btn" data-act="import">Import a vCard (.vcf)</button>
+          ${signedIn() ? '<button class="btn" data-act="gimport">Import from Google Contacts</button>' : ''}
+          <button class="btn ${signedIn() ? 'ghost' : ''}" data-act="import">Import a vCard (.vcf)</button>
           <button class="btn ghost" data-act="add">Add someone manually</button>
           <button class="btn subtle" data-act="sample">Try it with sample contacts</button>
         </div>
@@ -340,6 +388,7 @@
       <h2>Contacts</h2>
       <p class="who">${store.contacts.length} on this device</p>
       <div class="toolrow">
+        ${signedIn() ? '<button class="btn ghost" data-act="gimport" style="grid-column:1/-1">Sync from Google Contacts</button>' : ''}
         <button class="btn ghost" data-act="import">Import vCard</button>
         <button class="btn ghost" data-act="add">Add manually</button>
         <button class="btn ghost" data-act="backup">Export backup</button>
@@ -348,6 +397,7 @@
       </div>
       <div class="list">${rows}</div>
       <button class="btn subtle danger" data-act="clear" style="width:100%">Erase everything</button>
+      ${signedIn() ? `<button class="btn subtle" data-act="signout" style="width:100%;margin-top:8px">Sign out ${esc(gsession().email || '')}</button>` : ''}
       <p class="muted">Stored only in this browser. Export a backup before clearing Safari data, an iOS update, or switching devices.</p>`;
     document.body.append(scrim, sheet);
   }
@@ -564,6 +614,56 @@
         toast('Tagged ' + n + ' ' + t);
         break;
       }
+      case 'signin': {
+        const note = document.getElementById('signin-note');
+        el.disabled = true; el.textContent = 'Opening Google...';
+        G().signIn().then(() => {
+          buildDeck();
+          view = store.contacts.length ? (deck.length ? 'deck' : 'empty') : 'onboarding';
+          render();
+        }).catch((err) => {
+          el.disabled = false; el.textContent = 'Continue with Google';
+          // A blocked popup and a dead network fail the same way from here, and the fix
+          // differs, so name both rather than guessing which one happened.
+          if (note) {
+            note.textContent = err && err.message === 'offline'
+              ? 'Could not reach Google. Check your connection and try again.'
+              : 'Sign-in did not complete. Allow pop-ups for this site, then try again.';
+          }
+        });
+        break;
+      }
+      case 'signout':
+        if (confirm('Sign out? Your contacts and history stay on this device.')) {
+          G().signOut();
+          closeOverlay();
+          view = 'signin';
+          render();
+        }
+        break;
+      case 'gimport': {
+        el.disabled = true;
+        const label = el.textContent;
+        el.textContent = 'Reading Google Contacts...';
+        G().fetchContacts().then((res) => {
+          if (!res.contacts.length) { toast('No contacts with phone numbers found'); el.disabled = false; el.textContent = label; return; }
+          const r = addContacts(res.contacts);
+          buildDeck(); view = deck.length ? 'deck' : 'empty'; closeOverlay(); render();
+          const bits = [];
+          if (r.added) bits.push(r.added + ' added');
+          if (r.tagged) bits.push(r.tagged + ' tagged');
+          if (r.noted) bits.push(r.noted + ' notes');
+          toast(bits.length ? 'Google: ' + bits.join(', ') : 'Already up to date');
+          if (!res.hadTags && r.touched.length && r.added) openBulkTag(r.touched);
+        }).catch((err) => {
+          el.disabled = false; el.textContent = label;
+          const m = err && err.message;
+          toast(m === 'auth_expired' ? 'Google access expired, sign in again'
+            : m === 'offline' ? 'Could not reach Google'
+            : 'Could not read Google Contacts');
+        });
+        break;
+      }
       case 'sample': start(SAMPLES); break;
       case 'backup': exportBackup(); break;
       case 'restore': importFile('.json,application/json', (txt) => {
@@ -664,7 +764,11 @@
   window.__hittem = { parseVCards, openBulkTag, addContacts }; // console/testing hook; the app itself never uses it
   load();
   if (navigator.storage && navigator.storage.persist) { navigator.storage.persist().catch(() => {}); }
-  if (store.contacts.length) { buildDeck(); view = deck.length ? 'deck' : 'empty'; }
+  // The stored session is trusted on open rather than revalidated against Google. That is
+  // deliberate: it keeps the app usable offline, which a home-screen PWA has to be, and
+  // revalidating would add nothing since the gate is not a confidentiality boundary.
+  if (gateEnabled() && !signedIn()) { view = 'signin'; }
+  else if (store.contacts.length) { buildDeck(); view = deck.length ? 'deck' : 'empty'; }
   else { view = 'onboarding'; }
   render();
 
