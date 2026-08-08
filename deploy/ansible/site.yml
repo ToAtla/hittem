@@ -1,0 +1,144 @@
+---
+# Configures the Hittem web VM. Replaces the previous cloud-init user-data: this is
+# idempotent and re-runnable, where cloud-init's runcmd fires once on first boot and
+# leaves you rebuilding the instance to retry a failed step.
+#
+#   ansible-playbook -i inventory.ini site.yml
+#
+# Content is not deployed here. The GitHub Actions workflow rsyncs web/ into
+# /srv/hittem on every push to main; this playbook only prepares the box to serve it.
+
+- name: Provision the Hittem web server
+  hosts: hittem
+  become: true
+
+  vars:
+    site_domain: hittem.site
+    web_root: /srv/hittem
+    deploy_user: deploy
+    deploy_authorized_key: "{{ lookup('file', lookup('env', 'HOME') + '/.ssh/hittem-deploy.pub') }}"
+
+  tasks:
+    - name: Fail early if the host has no outbound access
+      # Caddy cannot obtain a certificate without reaching Let's Encrypt, and apt cannot
+      # install it without reaching the repository. The guest network denies egress
+      # unless its offering sets egressdefaultpolicy=true, and the failure is silent:
+      # the virtual router still answers DNS, so names resolve and connections hang.
+      # Better to say so here than to time out three tasks later.
+      ansible.builtin.uri:
+        url: https://dl.cloudsmith.io/public/caddy/stable/gpg.key
+        method: HEAD
+        timeout: 15
+      register: egress_check
+      failed_when: egress_check is failed
+      changed_when: false
+
+    - name: Install prerequisites
+      ansible.builtin.apt:
+        name:
+          - debian-keyring
+          - debian-archive-keyring
+          - apt-transport-https
+          - curl
+          - gnupg
+          - rsync
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Add the Caddy repository signing key
+      ansible.builtin.get_url:
+        url: https://dl.cloudsmith.io/public/caddy/stable/gpg.key
+        dest: /etc/apt/keyrings/caddy-stable.asc
+        mode: '0644'
+
+    - name: Add the Caddy repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/caddy-stable.asc] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main"
+        filename: caddy-stable
+        state: present
+
+    - name: Install Caddy
+      ansible.builtin.apt:
+        name: caddy
+        state: present
+        update_cache: true
+
+    - name: Create the deploy user
+      # Deliberately not in sudo. A leaked deploy key should get an attacker the ability
+      # to change the static site, not the machine.
+      ansible.builtin.user:
+        name: "{{ deploy_user }}"
+        shell: /bin/bash
+        create_home: true
+        password_lock: true
+
+    - name: Authorise the deploy key
+      ansible.posix.authorized_key:
+        user: "{{ deploy_user }}"
+        key: "{{ deploy_authorized_key }}"
+        exclusive: true
+
+    - name: Create the web root
+      ansible.builtin.file:
+        path: "{{ web_root }}"
+        state: directory
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: '0755'
+
+    - name: Install a placeholder page
+      # Gives the ACME challenge and any health check a document root that exists
+      # between provisioning and the first rsync. force=false so a real deploy is never
+      # overwritten by a later playbook run.
+      ansible.builtin.copy:
+        dest: "{{ web_root }}/index.html"
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: '0644'
+        force: false
+        content: |
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>Hittem</title>
+          <p>Provisioned. Waiting for the first deploy.</p>
+
+    - name: Install the Caddyfile
+      ansible.builtin.copy:
+        src: ../Caddyfile
+        dest: /etc/caddy/Caddyfile
+        owner: root
+        group: root
+        mode: '0644'
+        validate: caddy validate --adapter caddyfile --config %s
+      notify: Reload caddy
+
+    - name: Harden sshd
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/99-hardening.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          PermitRootLogin prohibit-password
+        validate: /usr/sbin/sshd -t -f %s
+      notify: Restart sshd
+
+    - name: Enable and start Caddy
+      ansible.builtin.systemd_service:
+        name: caddy
+        enabled: true
+        state: started
+
+  handlers:
+    - name: Reload caddy
+      ansible.builtin.systemd_service:
+        name: caddy
+        state: reloaded
+
+    - name: Restart sshd
+      ansible.builtin.systemd_service:
+        name: ssh
+        state: restarted

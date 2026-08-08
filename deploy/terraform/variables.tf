@@ -16,6 +16,23 @@ variable "zone" {
   default     = "is1"
 }
 
+variable "instance_name" {
+  description = "Instance and hostname. Named for the role rather than for Hittem, since the box is a general public web host and Caddy can serve further sites from the same Caddyfile."
+  type        = string
+  default     = "public-sites"
+}
+
+variable "network_offering" {
+  description = <<-EOT
+    Network offering for the guest network. Must be one whose egressdefaultpolicy is
+    true: this zone rejects createEgressFirewallRule with error 4350, so egress cannot
+    be opened after the network exists. DefaultNetworkOfferingforKubernetesService has
+    the same service list as the standard isolated offering and permits egress.
+  EOT
+  type        = string
+  default     = "DefaultNetworkOfferingforKubernetesService"
+}
+
 variable "service_offering" {
   description = "Compute offering. Atlas.a4 (1 vCPU / 4 GB) is the smallest available and is already far more than a static site needs."
   type        = string
@@ -23,9 +40,9 @@ variable "service_offering" {
 }
 
 variable "template" {
-  description = "OS template for the instance."
+  description = "OS template for the instance. Ubuntu matches the CKS nodes already running in this zone, so the box behaves like the rest of the fleet."
   type        = string
-  default     = "Debian 13"
+  default     = "Ubuntu 24.04 LTS"
 }
 
 variable "keypair" {
